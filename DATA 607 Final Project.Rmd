@@ -1,0 +1,553 @@
+---
+title: 'DATA 607: Final Project'
+author: "Vinicio Haro"
+date: "5/12/2018"
+output: html_document
+---
+
+Goal: What is the relationship between obesity and social economic status in NYC?
+
+As someone who grew up in NYC, I remember living in an area where there was an abundance of fast food restaurants. It almost seemed like there was one on every corner. Often times it felt like for every 10 fast food restaurant, there was maybe one supermarket. The people around me, including myself had cheap and easy access to sugary drinks, candy, chips, and all sorts of goodies. We all know these foods contribute the Obesity.   
+
+For this project, I want to study and pin point where the obesity instances are the highest in NYC. Is it the same as where the Lowest Income Adults live? 
+
+The study outline is as follows:
+I) Main data collection and cleaning transformations (Any additional data sources will be added in adlib and stored in MySQL)
+
+II) EDA
+
+III) Analysis and conclusions 
+
+Data Collection: 
+
+Plan:
+-Gather data on income on by NYC region
+-Gather data on obesity by NYC region
+
+We will first consider data from the U.S census. There is a handy API which allows us to query data directly from source. You will need to sign up for an API key. Our goal is to gain aggregated data from the census that gives provides social economic status by region. 
+Tutorial: https://cran.r-project.org/web/packages/censusapi/vignettes/getting-started.html
+```{r, include=FALSE}
+# Add key to .Renviron
+Sys.setenv(CENSUS_KEY='558bbac270e23a30835dfa6434dad9f679db1ffa')
+# Reload .Renviron
+readRenviron("~/.Renviron")
+# Check to see that the expected key is output in your R console
+Sys.getenv("CENSUS_KEY")
+```
+
+We are able to view and identify the data that we need
+```{r}
+#block out View otherwise it will yield large output when performing knit 
+library(censusapi)
+apis <- listCensusApis()
+#View(apis)
+```
+
+We will be using the Small Area Health Insurance Estimates API.
+
+Identify the variables that would contribute to this study
+```{r}
+sahie_vars <- listCensusMetadata(name = "timeseries/healthins/sahie", type = "variables")
+head(sahie_vars, 20)
+```
+
+We want the following variables:
+NAME- Name of geography returned
+AGE_DESC- Age Category Description 
+IPRCAT: Income Poverty Ratio Category
+IPR_DESC: Income Poverty Ratio Category Description
+PCTUI_PT: Percent Uninsured in Demographic Group for Selected Income Range, Estimate
+COUNTY	County FIPS Code
+
+The percentage of people who are not covered by insurance should be a sufficient proxy measure. There are several papers and articles that study the correlation between having insurance and economic status, for example 
+https://www.ncbi.nlm.nih.gov/pubmed/11297885
+
+Filter down to the state level
+```{r}
+listCensusMetadata(name = "timeseries/healthins/sahie", type = "geography")
+```
+```{r}
+census_directory<-getCensus(name = "timeseries/healthins/sahie",
+    vars = c("NAME","AGE_DESC",  "IPRCAT", "IPR_DESC", "PCTUI_PT", "COUNTY"), 
+    region = "county:*", time = 2015)
+head(census_directory)
+```
+
+We do not need all counties. We just want to focus on counties within NY. We can use the following link to identify the FIPS code for NYC counties and apply it to our filter
+http://library.columbia.edu/locations/dssc/data/nycounty_fips.html
+
+We first identify by NYS, and then subset this data frame by the FIPS code: 
+```{r}
+nyc_counties <- getCensus(name = "timeseries/healthins/sahie",
+    vars = c("NAME","AGE_DESC",  "IPRCAT", "IPR_DESC","PCTUI_PT", "COUNTY"), 
+    region = "county:*", regionin = "state:36", time = 2015)
+head(nyc_counties, n=12L)
+```
+
+Subset by FIPS code
+005 - Bronx
+047 - Kings (Brooklyn)
+061 - New York (Manhattan)
+081 - Queens
+085 - Richmond (Staten Island)
+```{r}
+library(dplyr)
+k<-c('005', '047', '061', '081', '085')
+df.nyincome <- select(filter(nyc_counties, county %in% k),c('time', 'NAME', 'AGE_DESC', 'IPRCAT', 'IPR_DESC', 'PCTUI_PT'))
+head(df.nyincome)
+```
+
+We should convert the columns to the correct data types. For example, PCTUI_PT should be a numeric and not char. 
+```{r}
+df.nyincome$PCTUI_PT <- as.numeric(as.character(df.nyincome$PCTUI_PT))
+head(df.nyincome)
+```
+
+Convert the column names into something more constant 
+```{r}
+names(df.nyincome)[names(df.nyincome) == "NAME"] <- "county"
+names(df.nyincome)[names(df.nyincome) == "AGE_DESC"] <- "age_group"
+names(df.nyincome)[names(df.nyincome) == "IPRCAT"] <- "poverty_level"
+names(df.nyincome)[names(df.nyincome) == "IPR_DESC"] <- "poverty_group"
+names(df.nyincome)[names(df.nyincome) == "PCTUI_PT"] <- "percent_uninsured"
+names(df.nyincome)
+```
+
+I want to store this data in MySQL for safekeeping and easier access for future use. 
+library(RMySQL)
+mydb = dbConnect(MySQL(), user='', password='', dbname='', host='')
+
+```{r, include=FALSE}
+library(RMySQL)
+mydb = dbConnect(MySQL(), user='root', password='data', dbname='final', host='localhost')
+```
+
+```{r}
+dbWriteTable(mydb,"NYCounty_Income",df.nyincome,overwrite=T)
+dbListTables(mydb)
+```
+
+Close connection (Not needed yet)
+```{r}
+#dbDisconnect(mydb)
+```
+
+We can also bring in data from an additional source. It has more granularity for the poverty rate on the neighborhood level. The data comes from:
+http://a816-dohbesp.nyc.gov/IndicatorPublic/VisualizationData.aspx?id=103,4466a0,109,Summarize
+
+We store this data in Github: 
+https://github.com/vindication09/DATA-607-Final-Project/blob/master/Poverty.csv
+
+```{r}
+library(readr)
+poverty.df <- read_csv("https://raw.githubusercontent.com/vindication09/DATA-607-Final-Project/master/Poverty.csv")
+head(poverty.df)
+```
+
+Store this data in MySQL
+```{r}
+dbWriteTable(mydb,"NYC_Poverty",poverty.df,overwrite=T)
+dbListTables(mydb)
+```
+
+The NYC income data has now been transformed and saved in a relational database.  
+
+The next set of data that we need should contain information for region and obesity measurments.  
+
+This dataset gives us information at the NYC Neighborhood level. We are given the estimated number of adults classified as obese in 2015. 
+http://a816-dohbesp.nyc.gov/IndicatorPublic/VisualizationData.aspx?id=2063,4466a0,113,Summarize
+
+After some manual cleaning (the spreadhseet is not large), the data is uploaded into Github for storage. 
+https://github.com/vindication09/DATA-607-Final-Project/blob/master/Obese%20Adults.csv
+
+```{r}
+library(readr)
+obesity.df <- read_csv("https://raw.githubusercontent.com/vindication09/DATA-607-Final-Project/master/Obese%20Adults.csv")
+head(obesity.df)
+```
+
+This dataset does not seem to need any transformations for cleaning. 
+Lets go ahead and save this data in our local instance of MySQL as well
+```{r}
+dbWriteTable(mydb,"NYC_obesity_estimates",obesity.df,overwrite=T)
+dbListTables(mydb)
+```
+
+EDA:
+Lets analyze the data we collected using visualizations. 
+
+The NY income data gives us aggregated data which looks at the percentage of people, by Borough, who are uninsured. 
+```{r}
+names(df.nyincome)
+```
+
+Lets convert the data from wide to long in order to visualize with a stacked bar plot 
+```{r}
+df.nyincome_b <- select(filter(df.nyincome),c('county', 'poverty_level', 'percent_uninsured'))
+head(df.nyincome_b)
+```
+
+Add a new column that divides the current percent by 100 in order to scale in a stacked bar plot.
+```{r}
+df.nyincome_b["percent"] <- NA
+df.nyincome_b$percent <- df.nyincome_b$percent_uninsured/100
+```
+
+
+```{r}
+library(ggplot2)
+library(scales)
+
+ggplot(df.nyincome_b, aes(x=county, y=percent, fill=poverty_level)) + 
+  geom_bar(stat="identity") +
+  xlab("\nCounty") +
+  ylab("Percent\n") +
+  guides(fill=FALSE) +
+  theme_bw() +
+  scale_y_continuous(labels = percent_format())
+```
+
+The color scales are ordered by poverty level. The lowest is 0 (pink) and the highest is 5 (orange). According the the chart, Queens County has the highest percentage of uninsured people who are categoried in the highest level of poverty.
+
+We have another dataset that gives us neighborhood level granularity on poverty. Lets look at each instance of poverty by neighborhood for each Borough
+```{r, include=FALSE}
+library(zipcode)
+data(zipcode)
+head(zipcode)
+```
+
+
+```{r, include=FALSE}
+g<-c('Queens Village', 'Brooklyn', 'Staten Island', 'Bronx', 'Manhattan')
+df.NYCzip <- select(filter(zipcode, city %in% g),c('zip', 'city', 'latitude', 'longitude'))
+head(df.NYCzip)
+```
+
+```{r, include=FALSE}
+dbWriteTable(mydb,"NYC_zip",df.NYCzip,overwrite=T)
+dbListTables(mydb)
+```
+
+```{r, include=FALSE}
+zipsql<-("select 
+         zip, city, latitude, longitude
+         from NYC_zip
+         group by zip, city, latitude, longitude;")
+
+zipclean<-dbGetQuery(mydb, zipsql)
+```
+
+Note: I Originally planned to Map GEO code to zip code and then map zip code to neighborhood. This proved to be more difficult by requiring the usage of "shapefiles", which I am not familiar with yet. 
+
+Lets analyze the poverty rate by individual neighborhood. 
+
+Queens:
+```{r, echo=FALSE}
+queens_poverty<-poverty.df[poverty.df$Borough == 'Queens',]
+#head(queens_poverty)
+
+df.queenspoverty <- select(filter(queens_poverty),c('Geography', 'Number', 'Percent'))
+#head(df.queenspoverty)
+
+df.queenspoverty["percent"] <- NA
+df.queenspoverty$percent <- df.queenspoverty$Percent/100
+#head(df.queenspoverty)
+
+#take the top 15 areas in Queens with the most poverty 
+top15_queens <- head(arrange(df.queenspoverty,desc(percent)), n = 10)
+
+#take the bottom 15 areas in Queens with the most poverty 
+bottom15_queens <- tail(arrange(df.queenspoverty,desc(percent)), n = 10)
+
+ggplot() + geom_bar(aes(y = percent, x = reorder(Geography, -percent)), data = top15_queens,stat="identity", fill = "#FF6666")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  labs( x="Neighborhood", y="Most Adult Poverty Percent Reported")
+
+ggplot() + geom_bar(aes(y = percent, x = reorder(Geography, -percent)), data = bottom15_queens,stat="identity", fill = "#FF6666")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  labs( x="Neighborhood", y="Least Adult Poverty Percent Reported")
+```
+
+Brooklyn:
+```{r, echo=FALSE}
+brooklyn_poverty<-poverty.df[poverty.df$Borough == 'Brooklyn',]
+#head(brooklyn_poverty)
+
+df.brooklynpoverty <- select(filter(brooklyn_poverty),c('Geography', 'Number', 'Percent'))
+#head(df.brooklynpoverty)
+
+df.brooklynpoverty["percent"] <- NA
+df.brooklynpoverty$percent <- df.brooklynpoverty$Percent/100
+#head(df.brooklynpoverty)
+
+#take the top 15 areas in brooklyn with the most poverty 
+top15_brooklyn <- head(arrange(df.brooklynpoverty,desc(percent)), n = 10)
+
+#take the bottom 15 areas in brooklyn with the most poverty 
+bottom15_brooklyn <- tail(arrange(df.brooklynpoverty,desc(percent)), n =10)
+
+ggplot() + geom_bar(aes(y = percent, x = reorder(Geography, -percent)), data = top15_brooklyn,stat="identity", fill = "#FF6666")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  labs( x="Neighborhood", y="Most Adult Poverty Percent Reported")
+
+ggplot() + geom_bar(aes(y = percent, x = reorder(Geography, -percent)), data = bottom15_brooklyn,stat="identity", fill = "#FF6666")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  labs( x="Neighborhood", y="Least Adult Poverty Percent Reported")
+```
+
+Manhattan:
+```{r, echo=FALSE}
+manhattan_poverty<-poverty.df[poverty.df$Borough == 'Manhattan',]
+#head(manhattan_poverty)
+
+df.manhattanpoverty <- select(filter(manhattan_poverty),c('Geography', 'Number', 'Percent'))
+#head(df.manhattanpoverty)
+
+df.manhattanpoverty["percent"] <- NA
+df.manhattanpoverty$percent <- df.manhattanpoverty$Percent/100
+#head(df.manhattanpoverty)
+
+#take the top 15 areas in manhattan with the most poverty 
+top15_manhattan <- head(arrange(df.manhattanpoverty,desc(percent)), n = 10)
+
+#take the bottom 15 areas in manhattan with the most poverty 
+bottom15_manhattan <- tail(arrange(df.manhattanpoverty,desc(percent)), n =10)
+
+ggplot() + geom_bar(aes(y = percent, x = reorder(Geography, -percent)), data = top15_manhattan,stat="identity", fill = "#FF6666")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  labs( x="Neighborhood", y="Most Adult Poverty Percent Reported")
+
+ggplot() + geom_bar(aes(y = percent, x = reorder(Geography, -percent)), data = bottom15_manhattan,stat="identity", fill = "#FF6666")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  labs( x="Neighborhood", y="Least Adult Poverty Percent Reported")
+```
+
+Bronx:
+```{r, echo=FALSE}
+bronx_poverty<-poverty.df[poverty.df$Borough == 'Bronx',]
+#head(bronx_poverty)
+
+df.bronxpoverty <- select(filter(bronx_poverty),c('Geography', 'Number', 'Percent'))
+#head(df.bronxpoverty)
+
+df.bronxpoverty["percent"] <- NA
+df.bronxpoverty$percent <- df.bronxpoverty$Percent/100
+#head(df.bronxpoverty)
+
+#take the top 15 areas in bronx with the most poverty 
+top15_bronx <- head(arrange(df.bronxpoverty,desc(percent)), n = 10)
+
+#take the bottom 15 areas in bronx with the most poverty 
+bottom15_bronx <- tail(arrange(df.bronxpoverty,desc(percent)), n = 10)
+
+ggplot() + geom_bar(aes(y = percent, x = reorder(Geography, -percent)), data = top15_bronx,stat="identity", fill = "#FF6666")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  labs( x="Neighborhood", y="Most Adult Poverty Percent Reported")
+
+ggplot() + geom_bar(aes(y = percent, x = reorder(Geography, -percent)), data = bottom15_bronx,stat="identity", fill = "#FF6666")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  labs( x="Neighborhood", y="Least Adult Poverty Percent Reported")
+```
+
+Staten Island:
+```{r, echo=FALSE}
+staten_island_poverty<-poverty.df[poverty.df$Borough == 'Staten Island',]
+#head(staten_island_poverty)
+
+df.staten_islandpoverty <- select(filter(staten_island_poverty),c('Geography', 'Number', 'Percent'))
+#head(df.staten_islandpoverty)
+
+df.staten_islandpoverty["percent"] <- NA
+df.staten_islandpoverty$percent <- df.staten_islandpoverty$Percent/100
+#head(df.staten_islandpoverty)
+
+#take the top 15 areas in staten_island with the most poverty 
+top15_staten_island <- head(arrange(df.staten_islandpoverty,desc(percent)), n = 10)
+
+#take the bottom 15 areas in staten_island with the most poverty 
+bottom15_staten_island <- tail(arrange(df.staten_islandpoverty,desc(percent)), n = 10)
+
+ggplot() + geom_bar(aes(y = percent, x = reorder(Geography, -percent)), data = top15_staten_island,stat="identity", fill = "#FF6666")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  labs( x="Neighborhood", y="Most Adult Poverty Percent Reported")
+
+ggplot() + geom_bar(aes(y = percent, x = reorder(Geography, -percent)), data = bottom15_staten_island,stat="identity", fill = "#FF6666")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  labs( x="Neighborhood", y="Least Adult Poverty Percent Reported")
+```
+
+Note: Certain peaks that are out of order in the plot are aggregated values for a whole Neighborhood's sub areas. 
+
+We will plot the similar charts to get a break down of the estimated number of adults classified as Obese per neighborhood. 
+Queens:
+```{r, echo=FALSE}
+queens_obesity2<-obesity.df[obesity.df$Borough == 'Queens',]
+#head(queens_obesity2)
+
+df.queensobesity2 <- select(filter(queens_obesity2),c('Geography', 'Number', 'Percent'))
+#head(df.queensobesity2)
+
+#take the top 15 areas in queens with the most obesity 
+top15_queens2 <- head(arrange(df.queensobesity2,desc(Number)), n = 15)
+
+
+#take the bottom 15 areas in queens with the most obesity 
+bottom15_queens2 <- tail(arrange(df.queensobesity2,desc(Number)), n = 10)
+
+ggplot() + geom_bar(aes(y = Number, x = reorder(Geography, -Number)), data = top15_queens2,stat="identity", fill = "#FF6666")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  labs( x="Neighborhood", y="Estimated Number of Most Obese Adults")
+
+#ggplot() + geom_bar(aes(y = Number, x = reorder(Geography, -Number)), data = bottom15_queens2,stat="identity", fill = "#FF6666")+
+  #theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  #labs( x="Neighborhood", y="Estimated Number of Least Obese Adults")
+```
+
+Brooklyn:
+```{r, echo=FALSE}
+brooklyn_obesity2<-obesity.df[obesity.df$Borough == 'Brooklyn',]
+#head(brooklyn_obesity2)
+
+df.brooklynobesity2 <- select(filter(brooklyn_obesity2),c('Geography', 'Number', 'Percent'))
+#head(df.brooklynobesity2)
+
+#take the top 15 areas in brooklyn with the most obesity 
+top15_brooklyn2 <- head(arrange(df.brooklynobesity2,desc(Number)), n = 15)
+
+
+#take the bottom 15 areas in brooklyn with the most obesity 
+bottom15_brooklyn2 <- tail(arrange(df.brooklynobesity2,desc(Number)), n = 10)
+
+ggplot() + geom_bar(aes(y = Number, x = reorder(Geography, -Number)), data = top15_brooklyn2,stat="identity", fill = "#FF6666")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  labs( x="Neighborhood", y="Estimated Number of Most Obese Adults")
+
+#ggplot() + geom_bar(aes(y = Number, x = reorder(Geography, -Number)), data = bottom15_brooklyn2,stat="identity", fill = "#FF6666")+
+  #theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+ # labs( x="Neighborhood", y="Estimated Number of Least Obese Adults")
+```
+
+Manhhatan:
+```{r, echo=FALSE}
+manhattan_obesity2<-obesity.df[obesity.df$Borough == 'Manhattan',]
+#head(manhattan_obesity2)
+
+df.manhattanobesity2 <- select(filter(manhattan_obesity2),c('Geography', 'Number', 'Percent'))
+#head(df.manhattanobesity2)
+
+#take the top 15 areas in manhattan with the most obesity 
+top15_manhattan2 <- head(arrange(df.manhattanobesity2,desc(Number)), n = 15)
+
+
+#take the bottom 15 areas in manhattan with the most obesity 
+bottom15_manhattan2 <- tail(arrange(df.manhattanobesity2,desc(Number)), n = 15)
+
+ggplot() + geom_bar(aes(y = Number, x = reorder(Geography, -Number)), data = top15_manhattan2,stat="identity", fill = "#FF6666")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  labs( x="Neighborhood", y="Estimated Number of Most Obese Adults")
+
+#ggplot() + geom_bar(aes(y = Number, x = reorder(Geography, -Number)), data = bottom15_manhattan2,stat="identity", #fill = "#FF6666")+
+  #theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  #labs( x="Neighborhood", y="Estimated Number of Least Obese Adults")
+```
+
+Bronx:
+```{r, echo=FALSE}
+bronx_obesity2<-obesity.df[obesity.df$Borough == 'Bronx',]
+#head(bronx_obesity2)
+
+df.bronxobesity2 <- select(filter(bronx_obesity2),c('Geography', 'Number', 'Percent'))
+#head(df.bronxobesity2)
+
+#take the top 15 areas in bronx with the most obesity 
+top15_bronx2 <- head(arrange(df.bronxobesity2,desc(Number)), n = 15)
+
+
+#take the bottom 15 areas in bronx with the most obesity 
+bottom15_bronx2 <- tail(arrange(df.bronxobesity2,desc(Number)), n = 15)
+
+ggplot() + geom_bar(aes(y = Number, x = reorder(Geography, -Number)), data = top15_bronx2,stat="identity", fill = "#FF6666")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  labs( x="Neighborhood", y="Estimated Number of Most Obese Adults")
+
+#ggplot() + geom_bar(aes(y = Number, x = reorder(Geography, -Number)), data = bottom15_bronx2,stat="identity", fill = "#FF6666")+
+  #theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+ # scale_y_continuous(trans='log10')+
+  #labs( x="Neighborhood", y="Estimated Number of Least Obese Adults")
+```
+
+Staten Island:
+```{r, echo=FALSE}
+staten_island_obesity2<-obesity.df[obesity.df$Borough == 'Staten Island',]
+#head(staten_island_obesity2)
+
+df.staten_islandobesity2 <- select(filter(staten_island_obesity2),c('Geography', 'Number', 'Percent'))
+#head(df.staten_islandobesity2)
+
+#take the top 15 areas in staten_island with the most obesity 
+top15_staten_island2 <- head(arrange(df.staten_islandobesity2,desc(Number)), n = 15)
+
+
+#take the bottom 15 areas in staten_island with the most obesity 
+bottom15_staten_island2 <- tail(arrange(df.staten_islandobesity2,desc(Number)), n = 15)
+
+ggplot() + geom_bar(aes(y = Number, x = reorder(Geography, -Number)), data = top15_staten_island2,stat="identity", fill = "#FF6666")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  labs( x="Neighborhood", y="Estimated Number of Most Obese Adults")
+
+#ggplot() + geom_bar(aes(y = Number, x = reorder(Geography, -Number)), data = bottom15_staten_island2,stat="identity", fill = "#FF6666")+
+ # theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+ # scale_y_continuous(trans='log2')+
+  #labs( x="Neighborhood", y="Estimated Number of Least Obese Adults")
+```
+
+We see that the Obesity data is not as robust as the income data. There are a lot of neighborhoods missing. Solving the problem of getting a more complete dataset should be considered for future study. 
+
+Analysis and Conclusion:
+
+In the meantime, we can join the poverty dataset and the income dataset and see a side by side comparison for any matched neighborhood. Lets join using MySQL
+```{r}
+joinsql<-("select 
+         a.Geography, a.Number as 'ObeseAdults', b.Number as 'LowIncomeAdults'
+         from NYC_obesity_estimates a 
+          join NYC_Poverty b 
+         on (a.Borough=b.Borough and a.Geography=b.Geography);")
+
+joinclean<-dbGetQuery(mydb, joinsql)
+head(joinclean)
+```
+
+```{r}
+library(reshape)
+joinclean.df<- melt(joinclean, id.vars='Geography')
+ggplot(joinclean.df, aes(Geography, value)) +   
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  geom_bar(aes(fill = variable), position = "dodge", stat="identity")
+```
+
+From the looks of the chart, we can see that there are certain Neighborhoods where the number of Obese adults are almost the same as Low Income Adults, for example Bedford Stuyvesant - Crown Heights. There is not enough information in this plot to make a statistical inference. 
+
+The ggpubr package allows us to perform Hypothesis testing for correlation between Number of Low Income Adults and Number of Adults who are obese.
+GGPubr tutorial: http://www.sthda.com/english/wiki/correlation-test-between-two-variables-in-r
+
+Is there a linear relationship between Low Income Adults and Obesity?
+```{r}
+library("ggpubr")
+ggscatter(joinclean, x = "LowIncomeAdults", y = "ObeseAdults", 
+          add = "reg.line", conf.int = TRUE, 
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "Low Income Adults", ylab = "Obese Adults")
+```
+There is indeed a linear positive correlation between Adult Obesity and Low Income. The correlation coefficient is 0.56. Lets try a different function to verify the correlation. It should be noted that the low p value also implies statistically significant correlation. 
+
+Is there a correlation between Low Income Adults and Obesity?
+```{r}
+test <- cor.test(joinclean$LowIncomeAdults, joinclean$ObeseAdults, 
+                    method = "pearson")
+test
+```
+
+The alternate method also yields the same result. The correlation is significant at the 95 percent confidence level.
+
+Conclusion: 
+-The correlation between Low Income Adults and Obese Adults is significant. The correlation constant is .55 rounded up. Given the time to find a more complete dataset of city and Obesity instances, I do believe the results would have been more conclusive. I had originally planned on doing something clever with maps. I had data with a unique GEO ID and another with zip codes. There has to be a better way to map GEO ID to zip code and then map zip code to Lattitude and Longitude. With spatial parameters, we are able to plot on a map, the Obesity instances and the Low income Adults. I think this would be a great addition to this study. 
